@@ -1,3 +1,7 @@
+test.py
+preTrained/
+tb_record_3/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
