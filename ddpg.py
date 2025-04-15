@@ -27,7 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 #)
 
 # Define a tensorboard writer
-writer = SummaryWriter("./tb_record_3")
+writer = SummaryWriter("./tb_record_3/Pendulum")
 
 def soft_update(target, source, tau):
     for target_param, param in zip(target.parameters(), source.parameters()):
@@ -87,16 +87,23 @@ class Actor(nn.Module):
 
         ########## YOUR CODE HERE (5~10 lines) ##########
         # Construct your own actor network
+        self.layer1 = nn.Linear(num_inputs, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, hidden_size)
+        self.layer3 = nn.Linear(hidden_size, num_outputs)
 
-
-        
         ########## END OF YOUR CODE ##########
         
     def forward(self, inputs):
         
         ########## YOUR CODE HERE (5~10 lines) ##########
         # Define the forward pass your actor network
-        
+        x = self.layer1(inputs)
+        x = F.relu(x)
+        x = self.layer2(x)
+        x = F.relu(x)
+        x = self.layer3(x)
+        x = F.tanh(x)*2 # the feasible action is [-2,2]
+        return x
         
         
         ########## END OF YOUR CODE ##########
@@ -109,9 +116,9 @@ class Critic(nn.Module):
 
         ########## YOUR CODE HERE (5~10 lines) ##########
         # Construct your own critic network
-
-
-
+        self.layer1 = nn.Linear(num_inputs+num_outputs, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, hidden_size)
+        self.layer3 = nn.Linear(hidden_size, 1)
 
         ########## END OF YOUR CODE ##########
 
@@ -119,8 +126,13 @@ class Critic(nn.Module):
         
         ########## YOUR CODE HERE (5~10 lines) ##########
         # Define the forward pass your critic network
-        
-        
+        inputs = torch.cat((inputs, actions), -1)
+        x = self.layer1(inputs)
+        x = F.relu(x)
+        x = self.layer2(x)
+        x = F.relu(x)
+        x = self.layer3(x)
+        return x       
         
         ########## END OF YOUR CODE ##########        
         
@@ -155,10 +167,9 @@ class DDPG(object):
         ########## YOUR CODE HERE (3~5 lines) ##########
         # Add noise to your action for exploration
         # Clipping might be needed 
-
-
-
-
+        action = mu + action_noise.noise()
+        action = torch.clip(action, min=-2, max=2)  # feasible action space
+        return action
         ########## END OF YOUR CODE ##########
 
 
@@ -171,10 +182,27 @@ class DDPG(object):
         
         ########## YOUR CODE HERE (10~20 lines) ##########
         # Calculate policy loss and value loss
-        # Update the actor and the critic
-
-
-
+        # Update the actor and the critic          
+        
+        next_action_batch = self.actor_target(next_state_batch)
+        next_Q_batch = self.critic_target(next_state_batch, next_action_batch)
+        y_batch = reward_batch + self.gamma * next_Q_batch
+        
+        Q_batch = self.critic(state_batch, action_batch)
+        
+        value_loss = F.mse_loss(y_batch, Q_batch)
+        
+        self.critic_optim.zero_grad()
+        value_loss.backward()
+        self.critic_optim.step()
+        
+        action_batch_ = self.actor(state_batch)
+        Q_batch_ = self.critic(state_batch, action_batch_)
+        policy_loss = -Q_batch_.mean()
+        
+        self.actor_optim.zero_grad()   
+        policy_loss.backward()
+        self.action_optim.step() 
 
         ########## END OF YOUR CODE ########## 
 
@@ -205,7 +233,7 @@ class DDPG(object):
         if critic_path is not None: 
             self.critic.load_state_dict(torch.load(critic_path))
 
-def train():    
+def train(env_name):    
     num_episodes = 200
     gamma = 0.995
     tau = 0.002
@@ -234,20 +262,38 @@ def train():
         state = torch.Tensor([env.reset()])
 
         episode_reward = 0
+        value_losses = []
+        policy_losses = []
         while True:
             
             ########## YOUR CODE HERE (15~25 lines) ##########
             # 1. Interact with the env to get new (s,a,r,s') samples 
             # 2. Push the sample to the replay buffer
             # 3. Update the actor and the critic
-
-
-
+            action = agent.select_action(state, ounoise)
+            next_state, reward, done, _, _ = env.step(action)
+            memory.push(state, action, reward, next_state)            
+            total_numsteps+=1
+            
+            if len(memory)>= batch_size and total_numsteps% updates_per_step ==0:                     
+                batch = memory.sample(batch_size)
+                value_loss, policy_loss = agent.update_parameters(batch)
+                value_losses.append(value_loss)
+                policy_losses.append(policy_loss)
+                
+            episode_reward+=reward
+            state = next_state
+            if done:
+                break    
+            
             ########## END OF YOUR CODE ########## 
             # For wandb logging
             # wandb.log({"actor_loss": actor_loss, "critic_loss": critic_loss})
 
         rewards.append(episode_reward)
+        value_losses = np.mean(value_losses)
+        policy_losses = np.mean(policy_losses)        
+        
         t = 0
         if i_episode % print_freq == 0:
             state = torch.Tensor([env.reset()])
@@ -255,7 +301,7 @@ def train():
             while True:
                 action = agent.select_action(state)
 
-                next_state, reward, done, _ = env.step(action.numpy()[0])
+                next_state, reward, done, _, _= env.step(action.numpy()[0])
                 
                 env.render()
                 
@@ -275,6 +321,13 @@ def train():
             ewma_reward_history.append(ewma_reward)           
             print("Episode: {}, length: {}, reward: {:.2f}, ewma reward: {:.2f}".format(i_episode, t, rewards[-1], ewma_reward))
             
+            writer.add_scalar('Reward/ Episodic', episode_reward, i_episode)
+            writer.add_scalar('Reward/ EWMA', ewma_reward, i_episode)
+            writer.add_scalar('Loss/Policy Loss', policy_losses, i_episode)
+            writer.add_scalar('Loss/Value Loss', value_losses, i_episode)
+            
+            
+            
     agent.save_model(env_name, '.pth')        
  
 
@@ -284,6 +337,6 @@ if __name__ == '__main__':
     env = gym.make('Pendulum-v0')
     env.seed(random_seed)  
     torch.manual_seed(random_seed)  
-    train()
+    train(env_name = 'Pendulum-v0')
 
 
