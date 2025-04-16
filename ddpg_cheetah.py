@@ -14,9 +14,10 @@ from torch.optim import Adam
 from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+import torch.optim.lr_scheduler as Scheduler
 
 # Define a tensorboard writer
-writer = SummaryWriter("./tb_record_3/Pendulum")
+writer = SummaryWriter("./tb_record_3/HalfCheetah")
 
 def soft_update(target, source, tau):
     for target_param, param in zip(target.parameters(), source.parameters()):
@@ -134,10 +135,12 @@ class DDPG(object):
         self.actor_target = Actor(hidden_size, self.num_inputs, self.action_space)
         self.actor_perturbed = Actor(hidden_size, self.num_inputs, self.action_space)
         self.actor_optim = Adam(self.actor.parameters(), lr=lr_a)
+        self.actor_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.1)
 
         self.critic = Critic(hidden_size, self.num_inputs, self.action_space)
         self.critic_target = Critic(hidden_size, self.num_inputs, self.action_space)
         self.critic_optim = Adam(self.critic.parameters(), lr=lr_c)
+        self.critic_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.1)
 
         self.gamma = gamma
         self.tau = tau
@@ -298,7 +301,7 @@ def train(env_name):
 
                 next_state, reward, done, _ = env.step(action.numpy()[0])
                 
-                env.render()
+                #env.render()
                 
                 episode_reward += reward
 
@@ -320,6 +323,9 @@ def train(env_name):
             writer.add_scalar('Reward/ EWMA', ewma_reward, i_episode)
             writer.add_scalar('Loss/Policy Loss', policy_losses, i_episode)
             writer.add_scalar('Loss/Value Loss', value_losses, i_episode)
+        
+        agent.actor_scheduler.step()
+        agent.critic_scheduler.step()
                 
             
     agent.save_model(env_name, '.pth')        
