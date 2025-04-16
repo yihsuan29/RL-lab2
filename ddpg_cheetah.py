@@ -90,10 +90,8 @@ class Actor(nn.Module):
         x = F.relu(x)
         x = self.layer2(x)
         x = F.relu(x)
-        x = self.layer2(x)
-        x = F.relu(x)
         x = self.layer3(x)
-        x = F.tanh(x)*2 # the feasible action is [-2,2]
+        x = F.tanh(x)  # the feasible action is [-1,1]
         return x
         ########## END OF YOUR CODE ##########
 
@@ -159,7 +157,7 @@ class DDPG(object):
         noise = [0.0] if action_noise is None else action_noise.noise()
         noise = torch.FloatTensor(noise)
         action = mu + noise
-        action = torch.clip(action, min=-2, max=2)  # feasible action space
+        action = torch.clip(action, min=-1, max=1)  # feasible action space
         return action
         ########## END OF YOUR CODE ##########
 
@@ -224,16 +222,16 @@ class DDPG(object):
         if critic_path is not None: 
             self.critic.load_state_dict(torch.load(critic_path))
 
-def train(env_name, lr_a=1e-4, lr_c=1e-3, hidden_size = 128):    
-    num_episodes = 300
-    gamma = 0.995
-    tau = 0.002
-    # lr_a=1e-4
-    # lr_c=1e-3
-    # hidden_size = 128
+def train(env_name):    
+    num_episodes = 500
+    gamma = 0.99
+    tau = 0.005
+    lr_a=1e-3
+    lr_c=5e-3
+    hidden_size = 128
     noise_scale = 0.3
     replay_size = 100000
-    batch_size = 128
+    batch_size = 512
     updates_per_step = 1
     print_freq = 1
     ewma_reward = 0
@@ -322,21 +320,17 @@ def train(env_name, lr_a=1e-4, lr_c=1e-3, hidden_size = 128):
             writer.add_scalar('Reward/ EWMA', ewma_reward, i_episode)
             writer.add_scalar('Loss/Policy Loss', policy_losses, i_episode)
             writer.add_scalar('Loss/Value Loss', value_losses, i_episode)
-            
-        if (i_episode+1) % 30 ==0:
-            agent.save_model(f'{i_episode+1}.pth') 
                 
             
-    agent.save_model(env_name, '.pth') 
-    return -ewma_reward     
+    agent.save_model(env_name, '.pth')        
  
+
 if __name__ == '__main__':
     # For reproducibility, fix the random seed
     random_seed = 10  
-    env = gym.make('Pendulum-v1')
+    env = gym.make('HalfCheetah')
     env.seed(random_seed)  
     torch.manual_seed(random_seed)  
-    
-    
+    train('HalfCheetah')
 
 
