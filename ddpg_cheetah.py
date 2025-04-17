@@ -135,12 +135,12 @@ class DDPG(object):
         self.actor_target = Actor(hidden_size, self.num_inputs, self.action_space)
         self.actor_perturbed = Actor(hidden_size, self.num_inputs, self.action_space)
         self.actor_optim = Adam(self.actor.parameters(), lr=lr_a)
-        self.actor_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.1)
+        self.actor_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.3)
 
         self.critic = Critic(hidden_size, self.num_inputs, self.action_space)
         self.critic_target = Critic(hidden_size, self.num_inputs, self.action_space)
         self.critic_optim = Adam(self.critic.parameters(), lr=lr_c)
-        self.critic_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.1)
+        self.critic_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.3)
 
         self.gamma = gamma
         self.tau = tau
@@ -326,6 +326,9 @@ def train(env_name):
         
         agent.actor_scheduler.step()
         agent.critic_scheduler.step()
+        
+        if (i_episode+1)%50==0:
+            agent.save_model(f"{env_name}{i_episode+1}", '.pth')  
                 
             
     agent.save_model(env_name, '.pth')        
