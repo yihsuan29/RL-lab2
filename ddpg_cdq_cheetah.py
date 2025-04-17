@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torch.optim.lr_scheduler as Scheduler
 
 # Define a tensorboard writer
-writer = SummaryWriter("./tb_record_3/HalfCheetah")
+writer = SummaryWriter("./tb_record_3/HalfCheetah_CDQ")
 
 def soft_update(target, source, tau):
     for target_param, param in zip(target.parameters(), source.parameters()):
@@ -137,16 +137,22 @@ class DDPG(object):
         self.actor_optim = Adam(self.actor.parameters(), lr=lr_a)
         self.actor_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.3)
 
-        self.critic = Critic(hidden_size, self.num_inputs, self.action_space)
-        self.critic_target = Critic(hidden_size, self.num_inputs, self.action_space)
-        self.critic_optim = Adam(self.critic.parameters(), lr=lr_c)
-        self.critic_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.3)
+        self.critic1 = Critic(hidden_size, self.num_inputs, self.action_space)
+        self.critic2 = Critic(hidden_size, self.num_inputs, self.action_space)
+        self.critic_target1 = Critic(hidden_size, self.num_inputs, self.action_space)
+        self.critic_target2 = Critic(hidden_size, self.num_inputs, self.action_space)
+
+        self.critic_optim1 = Adam(self.critic1.parameters(), lr=lr_c)
+        self.critic_optim2 = Adam(self.critic2.parameters(), lr=lr_c)
+        self.critic_scheduler1 = Scheduler.StepLR(self.critic_optim1, step_size=300, gamma=0.3)
+        self.critic_scheduler2 = Scheduler.StepLR(self.critic_optim2, step_size=300, gamma=0.3)
 
         self.gamma = gamma
         self.tau = tau
 
         hard_update(self.actor_target, self.actor) 
-        hard_update(self.critic_target, self.critic)
+        hard_update(self.critic_target1, self.critic1)
+        hard_update(self.critic_target2, self.critic2)
 
 
     def select_action(self, state, action_noise=None):
@@ -177,19 +183,27 @@ class DDPG(object):
         # Update the actor and the critic          
         
         next_action_batch = self.actor_target(next_state_batch)
-        next_Q_batch = self.critic_target(next_state_batch, next_action_batch)
-        y_batch = reward_batch.view(-1,1) + self.gamma * next_Q_batch * (1-mask_batch.view(-1,1))
+        # compute the two Q_wi'(s', pi(s')), use the min as the Q_w'(s', pi(s'))
+        next_Q_batch1 = self.critic_target1(next_state_batch, next_action_batch)
+        next_Q_batch2 = self.critic_target2(next_state_batch, next_action_batch)
+        y_batch = reward_batch.view(-1,1) + self.gamma * torch.min(next_Q_batch1,next_Q_batch2)  * (1-mask_batch.view(-1,1))
         
-        Q_batch = self.critic(state_batch, action_batch)
+        Q_batch1 = self.critic1(state_batch, action_batch)
+        Q_batch2 = self.critic2(state_batch, action_batch)
         
-        value_loss = F.mse_loss(y_batch, Q_batch)
+        value_loss1 = F.mse_loss(y_batch, Q_batch1)
+        value_loss2 = F.mse_loss(y_batch, Q_batch2)
         
-        self.critic_optim.zero_grad()
-        value_loss.backward()
-        self.critic_optim.step()
+        self.critic_optim1.zero_grad()
+        value_loss1.backward()
+        self.critic_optim1.step()
+
+        self.critic_optim2.zero_grad()
+        value_loss2.backward()
+        self.critic_optim2.step()
         
         action_batch_ = self.actor(state_batch)
-        Q_batch_ = self.critic(state_batch, action_batch_)
+        Q_batch_ = self.critic1(state_batch, action_batch_)
         policy_loss = -Q_batch_.mean()
         
         self.actor_optim.zero_grad()   
@@ -199,12 +213,13 @@ class DDPG(object):
         ########## END OF YOUR CODE ########## 
 
         soft_update(self.actor_target, self.actor, self.tau)
-        soft_update(self.critic_target, self.critic, self.tau)
+        soft_update(self.critic_target1, self.critic1, self.tau)
+        soft_update(self.critic_target2, self.critic2, self.tau)
 
-        return value_loss.item(), policy_loss.item()
+        return value_loss1.item(), value_loss2.item(), policy_loss.item()
 
 
-    def save_model(self, env_name, suffix="", actor_path=None, critic_path=None):
+    def save_model(self, env_name, suffix="", actor_path=None, critic_path1=None, critic_path2=None):
         local_time = time.localtime()
         timestamp = time.strftime("%m%d%Y_%H%M%S", local_time)
         if not os.path.exists('preTrained/'):
@@ -212,18 +227,24 @@ class DDPG(object):
 
         if actor_path is None:
             actor_path = "preTrained/ddpg_actor_{}_{}_{}".format(env_name, timestamp, suffix) 
-        if critic_path is None:
-            critic_path = "preTrained/ddpg_critic_{}_{}_{}".format(env_name, timestamp, suffix) 
-        print('Saving models to {} and {}'.format(actor_path, critic_path))
-        torch.save(self.actor.state_dict(), actor_path)
-        torch.save(self.critic.state_dict(), critic_path)
+        if critic_path1 is None:
+            critic_path1 = "preTrained/ddpg_critic1_{}_{}_{}".format(env_name, timestamp, suffix) 
+        if critic_path2 is None:
+            critic_path2 = "preTrained/ddpg_critic2_{}_{}_{}".format(env_name, timestamp, suffix) 
 
-    def load_model(self, actor_path, critic_path):
-        print('Loading models from {} and {}'.format(actor_path, critic_path))
+        print('Saving models to {} , {} and {}'.format(actor_path, critic_path1, critic_path2))
+        torch.save(self.actor.state_dict(), actor_path)
+        torch.save(self.critic1.state_dict(), critic_path1)
+        torch.save(self.critic2.state_dict(), critic_path2)
+
+    def load_model(self, actor_path, critic_path1, critic_path2):
+        print('Loading models from {} , {} and {}'.format(actor_path, critic_path1, critic_path2))
         if actor_path is not None:
             self.actor.load_state_dict(torch.load(actor_path))
-        if critic_path is not None: 
-            self.critic.load_state_dict(torch.load(critic_path))
+        if critic_path1 is not None: 
+            self.critic1.load_state_dict(torch.load(critic_path1))
+        if critic_path2 is not None: 
+            self.critic2.load_state_dict(torch.load(critic_path2))
 
 def train(env_name):    
     num_episodes = 500
@@ -256,7 +277,8 @@ def train(env_name):
         state = torch.Tensor([env.reset()])
 
         episode_reward = 0
-        value_losses = []
+        value_losses1 = []
+        value_losses2 = []
         policy_losses = []
         while True:
             
@@ -275,8 +297,9 @@ def train(env_name):
             
             if len(memory)>= batch_size and total_numsteps% updates_per_step ==0:                     
                 batch = memory.sample(batch_size)
-                value_loss, policy_loss = agent.update_parameters(batch)
-                value_losses.append(value_loss)
+                value_loss1, value_loss2, policy_loss = agent.update_parameters(batch)
+                value_losses1.append(value_loss1)
+                value_losses2.append(value_loss2)
                 policy_losses.append(policy_loss)
                 
             episode_reward+=reward
@@ -289,7 +312,8 @@ def train(env_name):
             # wandb.log({"actor_loss": actor_loss, "critic_loss": critic_loss})
 
         rewards.append(episode_reward)
-        value_losses = np.mean(value_losses)
+        value_losses1 = np.mean(value_losses1)
+        value_losses2 = np.mean(value_losses2)
         policy_losses = np.mean(policy_losses)        
         
         t = 0
@@ -322,11 +346,13 @@ def train(env_name):
             writer.add_scalar('Reward/ Episodic', episode_reward, i_episode)
             writer.add_scalar('Reward/ EWMA', ewma_reward, i_episode)
             writer.add_scalar('Loss/Policy Loss', policy_losses, i_episode)
-            writer.add_scalar('Loss/Value Loss', value_losses, i_episode)
+            writer.add_scalar('Loss/Value Loss1', value_losses1, i_episode)
+            writer.add_scalar('Loss/Value Loss2', value_losses2, i_episode)
         
         agent.actor_scheduler.step()
-        agent.critic_scheduler.step()
-        
+        agent.critic_scheduler1.step()
+        agent.critic_scheduler2.step()
+
         if (i_episode+1)%50==0:
             agent.save_model(f"{env_name}{i_episode+1}", '.pth')  
                 
@@ -340,6 +366,6 @@ if __name__ == '__main__':
     env = gym.make('HalfCheetah')
     env.seed(random_seed)  
     torch.manual_seed(random_seed)  
-    train('HalfCheetah')
+    train('HalfCheetah_CDQ')
 
 
