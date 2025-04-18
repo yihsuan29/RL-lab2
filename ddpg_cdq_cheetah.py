@@ -15,9 +15,10 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import torch.optim.lr_scheduler as Scheduler
+import optuna
 
 # Define a tensorboard writer
-writer = SummaryWriter("./tb_record_3/HalfCheetah_CDQ")
+#writer = SummaryWriter("./tb_record_3/HalfCheetah_CDQ")
 
 def soft_update(target, source, tau):
     for target_param, param in zip(target.parameters(), source.parameters()):
@@ -126,7 +127,7 @@ class Critic(nn.Module):
         
 
 class DDPG(object):
-    def __init__(self, num_inputs, action_space, gamma=0.995, tau=0.0005, hidden_size=128, lr_a=1e-4, lr_c=1e-3):
+    def __init__(self, num_inputs, action_space, gamma, tau,lr_a, lr_c,step_size, lr_a_decay, lr_c_decay, hidden_size=128):
 
         self.num_inputs = num_inputs
         self.action_space = action_space
@@ -135,7 +136,7 @@ class DDPG(object):
         self.actor_target = Actor(hidden_size, self.num_inputs, self.action_space)
         self.actor_perturbed = Actor(hidden_size, self.num_inputs, self.action_space)
         self.actor_optim = Adam(self.actor.parameters(), lr=lr_a)
-        self.actor_scheduler = Scheduler.StepLR(self.actor_optim, step_size=300, gamma=0.3)
+        self.actor_scheduler = Scheduler.StepLR(self.actor_optim, step_size=step_size, gamma=lr_a_decay)
 
         self.critic1 = Critic(hidden_size, self.num_inputs, self.action_space)
         self.critic2 = Critic(hidden_size, self.num_inputs, self.action_space)
@@ -144,8 +145,8 @@ class DDPG(object):
 
         self.critic_optim1 = Adam(self.critic1.parameters(), lr=lr_c)
         self.critic_optim2 = Adam(self.critic2.parameters(), lr=lr_c)
-        self.critic_scheduler1 = Scheduler.StepLR(self.critic_optim1, step_size=300, gamma=0.3)
-        self.critic_scheduler2 = Scheduler.StepLR(self.critic_optim2, step_size=300, gamma=0.3)
+        self.critic_scheduler1 = Scheduler.StepLR(self.critic_optim1, step_size=step_size, gamma=lr_c_decay)
+        self.critic_scheduler2 = Scheduler.StepLR(self.critic_optim2, step_size=step_size, gamma=lr_c_decay)
 
         self.gamma = gamma
         self.tau = tau
@@ -181,13 +182,13 @@ class DDPG(object):
         ########## YOUR CODE HERE (10~20 lines) ##########
         # Calculate policy loss and value loss
         # Update the actor and the critic          
-        
-        next_action_batch = self.actor_target(next_state_batch)
-        # compute the two Q_wi'(s', pi(s')), use the min as the Q_w'(s', pi(s'))
-        next_Q_batch1 = self.critic_target1(next_state_batch, next_action_batch)
-        next_Q_batch2 = self.critic_target2(next_state_batch, next_action_batch)
-        y_batch = reward_batch.view(-1,1) + self.gamma * torch.min(next_Q_batch1,next_Q_batch2)  * (1-mask_batch.view(-1,1))
-        
+        with torch.no_grad():
+            next_action_batch = self.actor_target(next_state_batch)
+            # compute the two Q_wi'(s', pi(s')), use the min as the Q_w'(s', pi(s'))
+            next_Q_batch1 = self.critic_target1(next_state_batch, next_action_batch)
+            next_Q_batch2 = self.critic_target2(next_state_batch, next_action_batch)
+            y_batch = reward_batch.view(-1,1) + self.gamma * torch.min(next_Q_batch1,next_Q_batch2)  * (1-mask_batch.view(-1,1))
+            
         Q_batch1 = self.critic1(state_batch, action_batch)
         Q_batch2 = self.critic2(state_batch, action_batch)
         
@@ -195,7 +196,7 @@ class DDPG(object):
         value_loss2 = F.mse_loss(y_batch, Q_batch2)
         
         self.critic_optim1.zero_grad()
-        value_loss1.backward()
+        value_loss1.backward(retain_graph=True)
         self.critic_optim1.step()
 
         self.critic_optim2.zero_grad()
@@ -246,14 +247,14 @@ class DDPG(object):
         if critic_path2 is not None: 
             self.critic2.load_state_dict(torch.load(critic_path2))
 
-def train(env_name):    
+def train(env_name, writer, gamma, lr_a, lr_c, noise_scale, step_size, lr_a_decay, lr_c_decay):    
     num_episodes = 500
-    gamma = 0.99
+    #gamma = 0.99
     tau = 0.005
-    lr_a=1e-3
-    lr_c=5e-3
+    #lr_a=1e-3
+    #lr_c=5e-3
     hidden_size = 128
-    noise_scale = 0.3
+    #noise_scale = 0.5
     replay_size = 100000
     batch_size = 512
     updates_per_step = 1
@@ -264,8 +265,7 @@ def train(env_name):
     total_numsteps = 0
     updates = 0
 
-    
-    agent = DDPG(env.observation_space.shape[0], env.action_space, gamma, tau, hidden_size, lr_a, lr_c)
+    agent = DDPG(env.observation_space.shape[0], env.action_space, gamma, tau,lr_a, lr_c,step_size, lr_a_decay, lr_c_decay, hidden_size)
     ounoise = OUNoise(env.action_space.shape[0])
     memory = ReplayMemory(replay_size)
     
@@ -352,20 +352,63 @@ def train(env_name):
         agent.actor_scheduler.step()
         agent.critic_scheduler1.step()
         agent.critic_scheduler2.step()
-
-        if (i_episode+1)%50==0:
-            agent.save_model(f"{env_name}{i_episode+1}", '.pth')  
-                
+        
+        if (i_episode==100) and (ewma_reward<0):
+            break 
+        
+        if (i_episode==200) and (ewma_reward<1800):
+            break     
+              
             
-    agent.save_model(env_name, '.pth')        
+    if ewma_reward > 5000:
+        agent.save_model(f"{env_name}_{ewma_reward}", '.pth')
+    return ewma_reward
+       
  
+ 
+def objective(trial):
+    # Suggest hyperparameters
+    lr_a = trial.suggest_loguniform('lr_a', 5e-5, 1e-2)
+    lr_c = trial.suggest_loguniform('lr_c', 5e-5, 1e-2)
+    gamma = trial.suggest_uniform('gamma', 0.90, 0.999)
+    noise_scale = trial.suggest_uniform('noise_scale', 0.1, 0.5)
+    step_size = trial.suggest_int('step_size', 100, 300)
+    lr_a_decay = trial.suggest_uniform('lr_a_decay', 0.5, 0.99)
+    lr_c_decay = trial.suggest_uniform('lr_c_decay', 0.5, 0.99)
+
+    # TensorBoard log path
+    logdir = f"Tunning2/lr_a{lr_a:.1e}_lr_c{lr_c:.1e}_gamma{gamma:.3f}_noise{noise_scale:.2f}_stepsize{step_size}_lr_a_decay{lr_a_decay:.2f}_lr_c_decay{lr_c_decay:.2f}"
+    os.makedirs(logdir, exist_ok=True)
+    writer = SummaryWriter(log_dir=logdir)
+
+    # Modify your train function to accept these arguments
+    final_ewma = train(
+        env_name="HalfCheetah_CDQ",
+        writer=writer,
+        gamma=gamma,
+        lr_a=lr_a,
+        lr_c=lr_c,
+        noise_scale=noise_scale,
+        step_size=step_size,
+        lr_a_decay=lr_a_decay,
+        lr_c_decay=lr_c_decay
+    )
+
+    writer.close()
+
+    # Objective: maximize final EWMA reward
+    return final_ewma
+
+
 
 if __name__ == '__main__':
-    # For reproducibility, fix the random seed
-    random_seed = 10  
-    env = gym.make('HalfCheetah')
-    env.seed(random_seed)  
-    torch.manual_seed(random_seed)  
-    train('HalfCheetah_CDQ')
+    # For reproducibility
+    random_seed = 10
+    torch.manual_seed(random_seed)
+    env = gym.make('HalfCheetah-v2')
+    env.seed(random_seed)
 
+    # Create study
+    study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=random_seed))
+    study.optimize(objective, n_trials=50)
 
